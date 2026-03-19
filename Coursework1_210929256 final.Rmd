@@ -1,0 +1,304 @@
+---
+title: "Premier League Attendance with Meta's Prophet"
+author: "Shree Budhathoki"
+date: "14/03/26"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+## 1. Introduction
+
+This project looks at average match attendance in the English Premier League.
+
+The Premier League started in 1992. I want to understand how attendance has changed over time. I will use Meta's Prophet to forecast future attendance.
+
+Prophet is a forecasting tool released by Meta, it can handle trends, seasonality, and unusual events like COVID-19 and possibly the meningitis virus.
+
+The data covers 33 seasons from 1992/93 to 2025/26.
+Each row represents one season, the value is the average number of fans per match in a season.
+
+----
+
+## 2. The Data
+
+I built the dataset manually. The source is Wikipedia and Transfermarkt.
+
+I used the 1st of August each year as this is when the season typically begins. The final year 2025 has not finished yet, so i have used a projected value. 
+
+The 2019/20 and 2020/21 seasons were affected by COVID-19. Many matches were played without fans, I kept the data but will be deleting it to make it cleaner. 
+
+
+```{r build-data}
+library(prophet)
+library(ggplot2)
+library(dplyr)
+
+# average attendance per match, per season 
+# source: Wikipedia / Transfermarkt
+plAttendanceData <- data.frame(
+  ds = as.Date(c(
+    "1992-08-01", "1993-08-01", "1994-08-01", "1995-08-01",
+    "1996-08-01", "1997-08-01", "1998-08-01", "1999-08-01",
+    "2000-08-01", "2001-08-01", "2002-08-01", "2003-08-01",
+    "2004-08-01", "2005-08-01", "2006-08-01", "2007-08-01",
+    "2008-08-01", "2009-08-01", "2010-08-01", "2011-08-01",
+    "2012-08-01", "2013-08-01", "2014-08-01", "2015-08-01",
+    "2016-08-01", "2017-08-01", "2018-08-01", "2019-08-01",
+    "2020-08-01", "2021-08-01", "2022-08-01", "2023-08-01",
+    "2024-08-01", "2025-08-01"
+  )),
+  y = c(
+    21126, 23044, 24268, 28374,
+    28374, 29193, 30555, 30856,
+    32906, 33979, 35465, 35138,
+    33934, 34853, 35445, 35908,
+    36076, 34215, 35290, 35721,
+    36695, 36695, 36168, 36452,
+    35882, 38299, 38296, 39005,
+     3000, 10000, 40083, 38574,
+    40498, 41075
+  )
+)
+
+# the number of seasons
+cat("Number of seasons:", nrow(plAttendanceData), "\n")
+cat("First season: 1992/93 - Average attendance:",
+    plAttendanceData$y[1], "\n")
+cat("Latest season: 2025/26 - Average attendance:",
+    tail(plAttendanceData$y, 1), "\n")
+```
+
+The dataset runs from 1992/93 to 2025/26. Average attendance has grown from around 21,000 to over 41,000 per match, that is nearly double in 33 years.
+
+----
+
+## 3. Exploratory Analysis
+
+### 3.1 Plotting the raw data
+
+Let us first look at the raw attendance figures over time.
+
+```{r raw-plot}
+ggplot(plAttendanceData, aes(x = ds, y = y)) +
+  geom_line(colour = "#3d0059", linewidth = 1) +
+  geom_point(colour = "#3d0059", size = 2) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Premier League - Average match attendance per season",
+    subtitle = "1992/93 to 2025/26",
+    x = "Season start",
+    y = "Average attendance per match"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+The chart shows a clear upward trend. Attendance grew steadily from 1992 onwards.
+
+There is a large drop around 2020 and 2021. This was due to  COVID-19 where matches were played with no fans or very limited crowds.
+
+After COVID, attendance recovered quickly and reached record levels by 2025/26.
+
+### 3.2 Linear Regression: How fast did attendance grow?
+
+I fit a simple linear regression to measure the average growth per year.
+
+```{r linear-model}
+# Create a numeric year variable
+plAttendanceData$yearIndex <- as.numeric(format(plAttendanceData$ds, "%Y"))
+
+linearModel <- lm(y ~ yearIndex, data = plAttendanceData)
+summary(linearModel)
+```
+
+```{r growth-sentence}
+growthPerYear <- round(coef(linearModel)[2], 0)
+cat("Estimated attendance growth per year:", growthPerYear, "fans per match\n")
+```
+
+The model estimates that attendance grew by roughly 209 fans per match per year on average. This is a useful benchmark, even if the actual growth was not perfectly linear.
+
+### 3.3 Removing COVID seasons for a cleaner view
+
+I created a second dataset with COVID seasons removed. This helps see the underlying trend more clearly.
+
+```{r no-covid-plot}
+plDataNoCovid <- plAttendanceData %>%
+  filter(y > 15000)  # removes the behind-closed-doors seasons
+
+ggplot(plDataNoCovid, aes(x = ds, y = y)) +
+  geom_line(colour = "#3d0059", linewidth = 1) +
+  geom_point(colour = "#3d0059", size = 2) +
+  geom_smooth(method = "lm", se = TRUE, colour = "#00aaff", linetype = "dashed") +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Premier League attendance - COVID Seasons xxcluded",
+    subtitle = "Linear trend line shown in blue",
+    x = "Season Start",
+    y = "Average Attendance per Match"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+Without COVID, the upward trend is much clearer to see, the dotted blue line is the linear trend. Attendance has tracked above it in recent seasons, implying that the growth is accelerating.
+
+----
+
+## 4. Forecasting with Prophet
+
+### 4.1 Fitting the default model
+
+I will now fit Prophet to the full dataset, including COVID seasons.
+
+Prophet has a feature called changepoint detection. It automatically finds points where the trend changes. The COVID dip should be detected as a changepoint.
+
+I set `yearly.seasonality = FALSE` because our data is annual. There is no within-year seasonal pattern at this level of aggregation.
+
+```{r prophet-fit}
+# Fit the Prophet model to the full dataset
+prophetModel <- prophet(plAttendanceData, yearly.seasonality = FALSE)
+
+# Forecast 5 seasons ahead
+futureDates <- make_future_dataframe(prophetModel, periods = 5, freq = "year")
+
+# Generate the forecast
+forecastResult <- predict(prophetModel, futureDates)
+
+# Plot the forecast
+plot(prophetModel, forecastResult,
+     xlabel = "Season Start", ylabel = "Average Attendance per Match") +
+  ggtitle("Prophet Forecast: Premier League Attendance") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal(base_size = 13)
+```
+
+The black dots are the actual data, the blue line is Prophet's fitted trend. The shaded area is the 80% uncertainty interval.
+
+Prophet correctly captures the COVID dip. It then forecasts continued growth towards 42,000 to 43,000 fans per match by 2029.
+
+### 4.2 Viewing the trend component
+
+Prophet separates the forecast into components. With annual data, the most important component is the trend.
+
+```{r prophet-components}
+prophet_plot_components(prophetModel, forecastResult)
+```
+
+The trend plot shows the long-run growth in attendance, it also shows the recovery after COVID. Prophet treats this as a continuation of the pre-COVID trend.
+
+### 4.3 Detecting Changepoints
+
+Prophet automatically identifies where the growth rate changed. Let us visualise these changepoints.
+
+```{r changepoints}
+plot(prophetModel, forecastResult) +
+  add_changepoints_to_plot(prophetModel) +
+  ggtitle("Prophet forecast with detected changepoints") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal(base_size = 13)
+```
+
+The red dashed lines show the detected changepoints. We expect to see one around 2020 where COVID caused the sudden drop. This confirms Prophet is picking up the right events in the data.
+
+----
+
+## 5. Comparing Two Models: With and Without COVID Seasons
+
+COVID-19 was a one-off event and it is unlikely to happen again. A forecast based on the full data may be too pessimistic because the COVID dip pulls the trend down.
+
+I fit a second model using only non-COVID seasons. I then compare the forecasts.
+
+```{r model-no-covid}
+# Fit a Prophet model without COVID seasons
+prophetModelNoCovid <- prophet(plDataNoCovid, yearly.seasonality = FALSE)
+
+futureDatesNoCovid <- make_future_dataframe(
+  prophetModelNoCovid, periods = 5, freq = "year"
+)
+
+forecastNoCovid <- predict(prophetModelNoCovid, futureDatesNoCovid)
+
+plot(prophetModelNoCovid, forecastNoCovid,
+     xlabel = "Season Start", ylabel = "Average Attendance per Match") +
+  ggtitle("Prophet Forecast: Excluding COVID Seasons") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal(base_size = 13)
+```
+
+```{r compare-forecasts}
+# Compare the 5-year-ahead forecast from each model
+forecastFull5yr   <- round(tail(forecastResult$yhat, 1), 0)
+forecastNoCovid5yr <- round(tail(forecastNoCovid$yhat, 1), 0)
+
+cat("Full data model - 5-season forecast:", scales::comma(forecastFull5yr), "\n")
+cat("No-COVID model  - 5-season forecast:", scales::comma(forecastNoCovid5yr), "\n")
+cat("Difference:", scales::comma(forecastNoCovid5yr - forecastFull5yr),
+    "fans per match\n")
+```
+
+The no-COVID model gives a slightly higher forecast, this makes sense as the COVID data would have lowered the forecast. Without the 2020/21 disruption, Prophet sees a stronger underlying growth trend.
+
+Which model is better depends on your assumptions. If you believe COVID was a one-off event, the no-COVID model is more appropriate. If you want to be conservative, the full model is the safer choice.
+
+----
+
+## 6. Forecast Summary Table
+
+Here is a summary of the 5-season forecast from the default model.
+
+```{r forecast-table}
+futureForecastTable <- forecastResult %>%
+  filter(ds > max(plAttendanceData$ds)) %>%
+  select(ds, yhat, yhat_lower, yhat_upper) %>%
+  mutate(
+    Season   = paste0(format(ds, "%Y"), "/", as.integer(format(ds, "%Y")) - 1999),
+    Forecast = scales::comma(round(yhat, 0)),
+    LowerCI  = scales::comma(round(yhat_lower, 0)),
+    UpperCI  = scales::comma(round(yhat_upper, 0))
+  ) %>%
+  select(Season, Forecast, LowerCI, UpperCI)
+
+knitr::kable(
+  futureForecastTable,
+  col.names = c("Season", "Forecast", "Lower 80% CI", "Upper 80% CI"),
+  caption   = "5-Season Ahead Forecast - Average Attendance per Match"
+)
+```
+
+The forecast suggests attendance will continue to grow. By 2028/29, the model predicts average crowds of around 42,000 to 43,000 per match.
+
+The uncertainty interval widens further into the future. This is expected as we are less certain about what will happen in 5 years than in 1 year.
+
+----
+
+## 7. Conclusions
+
+This project used Meta's Prophet to forecast Premier League average attendance.
+
+Key findings:
+
+- Attendance has nearly doubled since 1992, from around 21,000 to over 40,000 fans per match.
+- The COVID-19 pandemic caused a sharp one-off drop in 2019/20 and 2020/21 however attendance fully recovered by the 2021/22 season.
+- Prophet automatically detected the COVID disruption as a changepoint. No manual adjustment was needed.
+- The 5-season forecast predicts continued growth, reaching around 42,000 to 43,000 fans per match by 2028/29.
+- Excluding COVID seasons gives a slightly more optimistic forecast.
+
+Prophet is well-suited to this kind of data. It handles structural breaks like COVID automatically and produces clear, interpretable component plots.
+
+
+## 8. References
+
+- Taylor, S.J. and Letham, B. (2018). Forecasting at scale. The American Statistician, 72(1), 37-45.
+- Meta Prophet documentation: https://facebook.github.io/prophet/
+- Attendance data: Wikipedia — Premier League and Transfermarkt
